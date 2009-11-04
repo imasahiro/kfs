@@ -44,6 +44,8 @@
 static const struct super_operations kfs_ops;
 static const struct inode_operations kfs_dir_inode_operations;
 
+extern const struct file_operations kfs_file_operations;
+
 static struct backing_dev_info kfs_backing_dev_info = {
     .ra_pages	= 0,	/* No readahead */
     .capabilities	= BDI_CAP_NO_ACCT_AND_WRITEBACK |
@@ -264,13 +266,6 @@ int kfs_get_sb(struct file_system_type *fs_type,
         int flags, const char *dev_name, void *data, struct vfsmount *mnt)
 {
     return get_sb_nodev(fs_type, flags, data, kfs_fill_super, mnt);
-}
-
-static int rootfs_get_sb(struct file_system_type *fs_type,
-        int flags, const char *dev_name, void *data, struct vfsmount *mnt)
-{
-    return get_sb_nodev(fs_type, flags|MS_NOUSER, data, kfs_fill_super,
-            mnt);
 }
 
 static void kfs_kill_sb(struct super_block *sb)
