@@ -1,6 +1,8 @@
+
+#	kfs-objs := super.o file.o inode.o
 ifneq ($(KERNELRELEASE),)
 	obj-m := kfs.o
-	kfs-objs := super.o file.o inode.o
+	kfs-objs := file-mmu.o inode.o
 else
 KVER = $(shell uname -r)
 KDIR = /lib/modules/$(KVER)/build

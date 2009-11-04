@@ -1,254 +1,301 @@
+/*
+ * Resizable simple ram filesystem for Linux.
+ *
+ * Copyright (C) 2000 Linus Torvalds.
+ *               2000 Transmeta Corp.
+ *
+ * Usage limits added by David Gibson, Linuxcare Australia.
+ * This file is released under the GPL.
+ */
+
+/*
+ * NOTE! This filesystem is probably most useful
+ * not as a real filesystem, but as an example of
+ * how virtual filesystems can be written.
+ *
+ * It doesn't get much simpler than this. Consider
+ * that this file implements the full semantics of
+ * a POSIX-compliant read-write filesystem.
+ *
+ * Note in particular how the filesystem does not
+ * need to implement any data structures of its own
+ * to keep track of the virtual data: using the VFS
+ * caches is sufficient.
+ */
+
 #include <linux/module.h>
 #include <linux/fs.h>
-#include <linux/mount.h>
 #include <linux/pagemap.h>
+#include <linux/highmem.h>
+#include <linux/time.h>
 #include <linux/init.h>
-#include <linux/kobject.h>
-#include <linux/namei.h>
-#include <linux/fsnotify.h>
 #include <linux/string.h>
-#include <linux/magic.h>
+#include <linux/backing-dev.h>
+#include <linux/sched.h>
+#include <linux/parser.h>
+#include <asm/uaccess.h>
+#include "internal.h"
 
-extern const struct file_operations kfs_file_operations;
-extern const struct inode_operations kfs_link_operations;
+/* some random number */
+#define KFS_MAGIC	0x858458f6
 
-extern const struct file_system_type kfs_type;
+#define KFS_DEFAULT_MODE	0755
 
-static struct inode *kfs_get_inode(struct super_block *sb, int mode, dev_t dev)
+static const struct super_operations kfs_ops;
+static const struct inode_operations kfs_dir_inode_operations;
+
+static struct backing_dev_info kfs_backing_dev_info = {
+    .ra_pages	= 0,	/* No readahead */
+    .capabilities	= BDI_CAP_NO_ACCT_AND_WRITEBACK |
+        BDI_CAP_MAP_DIRECT | BDI_CAP_MAP_COPY |
+        BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP,
+};
+
+struct inode *kfs_get_inode(struct super_block *sb, int mode, dev_t dev)
 {
-    struct inode *inode = new_inode(sb);
+    struct inode * inode = new_inode(sb);
 
     if (inode) {
         inode->i_mode = mode;
+        inode->i_uid = current_fsuid();
+        inode->i_gid = current_fsgid();
+        inode->i_mapping->a_ops = &kfs_aops;
+        inode->i_mapping->backing_dev_info = &kfs_backing_dev_info;
+        mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
+        mapping_set_unevictable(inode->i_mapping);
         inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
         switch (mode & S_IFMT) {
             default:
                 init_special_inode(inode, mode, dev);
                 break;
             case S_IFREG:
+                inode->i_op = &kfs_file_inode_operations;
                 inode->i_fop = &kfs_file_operations;
                 break;
-            case S_IFLNK:
-                inode->i_op = &kfs_link_operations;
-                break;
             case S_IFDIR:
-                inode->i_op = &simple_dir_inode_operations;
+                inode->i_op = &kfs_dir_inode_operations;
                 inode->i_fop = &simple_dir_operations;
-                /* directory inodes start off with i_nlink == 2
-                 * (for "." entry) */
+
+                /* directory inodes start off with i_nlink == 2 (for "." entry) */
                 inc_nlink(inode);
                 break;
+            case S_IFLNK:
+                inode->i_op = &page_symlink_inode_operations;
+                break;
         }
     }
-    return inode; 
+    return inode;
 }
 
+/*
+ * File creation. Allocate an inode, and we're done..
+ */
 /* SMP-safe */
-static int kfs_mknod(struct inode *dir, struct dentry *dentry,
-        int mode, dev_t dev)
+static int kfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
+{
+    struct inode * inode = kfs_get_inode(dir->i_sb, mode, dev);
+    int error = -ENOSPC;
+
+    if (inode) {
+        if (dir->i_mode & S_ISGID) {
+            inode->i_gid = dir->i_gid;
+            if (S_ISDIR(mode))
+                inode->i_mode |= S_ISGID;
+        }
+        d_instantiate(dentry, inode);
+        dget(dentry);	/* Extra count - pin the dentry in core */
+        error = 0;
+        dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+    }
+    return error;
+}
+
+static int kfs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
+{
+    int retval = kfs_mknod(dir, dentry, mode | S_IFDIR, 0);
+    if (!retval)
+        inc_nlink(dir);
+    return retval;
+}
+
+static int kfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata *nd)
+{
+    return kfs_mknod(dir, dentry, mode | S_IFREG, 0);
+}
+
+static int kfs_symlink(struct inode * dir, struct dentry *dentry, const char * symname)
 {
     struct inode *inode;
-    int error = -EPERM;
+    int error = -ENOSPC;
 
-    if (dentry->d_inode)
-        return -EEXIST;
-
-    inode = kfs_get_inode(dir->i_sb, mode, dev);
+    inode = kfs_get_inode(dir->i_sb, S_IFLNK|S_IRWXUGO, 0);
     if (inode) {
-        d_instantiate(dentry, inode);
-        dget(dentry);
-        error = 0;
-    }
-    return error;
-}
-
-static int kfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
-{
-    int res;
-
-    mode = (mode & (S_IRWXUGO | S_ISVTX)) | S_IFDIR;
-    res = kfs_mknod(dir, dentry, mode, 0);
-    if (!res) {
-        inc_nlink(dir);
-        fsnotify_mkdir(dir, dentry);
-    }
-    return res;
-}
-
-static int kfs_link(struct inode *dir, struct dentry *dentry, int mode)
-{
-    mode = (mode & S_IALLUGO) | S_IFLNK;
-    return kfs_mknod(dir, dentry, mode, 0);
-}
-
-static int kfs_create(struct inode *dir, struct dentry *dentry, int mode)
-{
-    int res;
-
-    mode = (mode & S_IALLUGO) | S_IFREG;
-    res = kfs_mknod(dir, dentry, mode, 0);
-    if (!res)
-        fsnotify_create(dir, dentry);
-    return res;
-}
-
-static inline int kfs_positive(struct dentry *dentry)
-{
-    return dentry->d_inode && !d_unhashed(dentry);
-}
-
-static int kfs_create_by_name(const char *name, mode_t mode,
-        struct dentry *parent,
-        struct dentry **dentry)
-{
-    int error = 0;
-
-    /* If the parent is not specified, we create it in the root.
-     * We need the root dentry to do this, which is in the super 
-     * block. A pointer to that is in the struct vfsmount that we
-     * have around.
-     */
-    if (!parent) {
-        /*
-           if (debugfs_mount && debugfs_mount->mnt_sb) {
-           parent = debugfs_mount->mnt_sb->s_root;
-           }
-         */
-    }
-    if (!parent) {
-        pr_debug("debugfs: Ah! can not find a parent!\n");
-        return -EFAULT;
-    }
-
-    *dentry = NULL;
-    mutex_lock(&parent->d_inode->i_mutex);
-    *dentry = lookup_one_len(name, parent, strlen(name));
-    if (!IS_ERR(*dentry)) {
-        switch (mode & S_IFMT) {
-            case S_IFDIR:
-                error = kfs_mkdir(parent->d_inode, *dentry, mode);
-                break;
-            case S_IFLNK:
-                error = kfs_link(parent->d_inode, *dentry, mode);
-                break;
-            default:
-                error = kfs_create(parent->d_inode, *dentry, mode);
-                break;
-        }
-        dput(*dentry);
-    } else
-        error = PTR_ERR(*dentry);
-    mutex_unlock(&parent->d_inode->i_mutex);
-
-    return error;
-}
-
-/**
- * debugfs_create_file - create a file in the debugfs filesystem
- * @name: a pointer to a string containing the name of the file to create.
- * @mode: the permission that the file should have
- * @parent: a pointer to the parent dentry for this file.  This should be a
- *          directory dentry if set.  If this paramater is NULL, then the
- *          file will be created in the root of the debugfs filesystem.
- * @data: a pointer to something that the caller will want to get to later
- *        on.  The inode.i_private pointer will point to this value on
- *        the open() call.
- * @fops: a pointer to a struct file_operations that should be used for
- *        this file.
- *
- * This is the basic "create a file" function for debugfs.  It allows for a
- * wide range of flexibility in createing a file, or a directory (if you
- * want to create a directory, the debugfs_create_dir() function is
- * recommended to be used instead.)
- *
- * This function will return a pointer to a dentry if it succeeds.  This
- * pointer must be passed to the debugfs_remove() function when the file is
- * to be removed (no automatic cleanup happens if your module is unloaded,
- * you are responsible here.)  If an error occurs, %NULL will be returned.
- *
- * If debugfs is not enabled in the kernel, the value -%ENODEV will be
- * returned.
- */
-struct dentry *kfs_create_file(const char *name, mode_t mode,
-        struct dentry *parent, void *data,
-        const struct file_operations *fops)
-{
-    struct dentry *dentry = NULL;
-    int error;
-    int kfs_mount_count = 0;
-    pr_debug("debugfs: creating file '%s'\n",name);
-    
-    /*
-    error = simple_pin_fs(&kfs_type, &kfs_mount, &kfs_mount_count);
-    if (error)
-        goto exit;
-
-    error = kfs_create_by_name(name, mode, parent, &dentry);
-    if (error) {
-        dentry = NULL;
-        simple_release_fs(&kfs_mount, &kfs_mount_count);
-        goto exit;
-    }
-
-    if (dentry->d_inode) {
-        if (data)
-            dentry->d_inode->i_private = data;
-        if (fops)
-            dentry->d_inode->i_fop = fops;
-    }
-    */
-exit:
-    return dentry;
-}
-
-/**
- * debugfs_create_dir - create a directory in the debugfs filesystem
- * @name: a pointer to a string containing the name of the directory to
- *        create.
- * @parent: a pointer to the parent dentry for this file.  This should be a
- *          directory dentry if set.  If this paramater is NULL, then the
- *          directory will be created in the root of the debugfs filesystem.
- *
- * This function creates a directory in debugfs with the given name.
- *
- * This function will return a pointer to a dentry if it succeeds.  This
- * pointer must be passed to the debugfs_remove() function when the file is
- * to be removed (no automatic cleanup happens if your module is unloaded,
- * you are responsible here.)  If an error occurs, %NULL will be returned.
- *
- * If debugfs is not enabled in the kernel, the value -%ENODEV will be
- * returned.
- */
-struct dentry *kfs_create_dir(const char *name, struct dentry *parent)
-{
-    return kfs_create_file(name, 
-            S_IFDIR | S_IRWXU | S_IRUGO | S_IXUGO,
-            parent, NULL, NULL);
-}
-
-static void __kfs_remove(struct dentry *dentry, struct dentry *parent)
-{
-    int ret = 0;
-
-    if (kfs_positive(dentry)) {
-        if (dentry->d_inode) {
+        int l = strlen(symname)+1;
+        error = page_symlink(inode, symname, l);
+        if (!error) {
+            if (dir->i_mode & S_ISGID)
+                inode->i_gid = dir->i_gid;
+            d_instantiate(dentry, inode);
             dget(dentry);
-            switch (dentry->d_inode->i_mode & S_IFMT) {
-                case S_IFDIR:
-                    ret = simple_rmdir(parent->d_inode, dentry);
-                    break;
-                case S_IFLNK:
-                    kfree(dentry->d_inode->i_private);
-                    /* fall through */
-                default:
-                    simple_unlink(parent->d_inode, dentry);
-                    break;
-            }
-            if (!ret)
-                d_delete(dentry);
-            dput(dentry);
-        }
+            dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+        } else
+            iput(inode);
     }
+    return error;
 }
 
+static const struct inode_operations kfs_dir_inode_operations = {
+    .create		= kfs_create,
+    .lookup		= simple_lookup,
+    .link		= simple_link,
+    .unlink		= simple_unlink,
+    .symlink	= kfs_symlink,
+    .mkdir		= kfs_mkdir,
+    .rmdir		= simple_rmdir,
+    .mknod		= kfs_mknod,
+    .rename		= simple_rename,
+};
 
+static const struct super_operations kfs_ops = {
+    .statfs		= simple_statfs,
+    .drop_inode	= generic_delete_inode,
+    .show_options	= generic_show_options,
+};
+
+struct kfs_mount_opts {
+    umode_t mode;
+};
+
+enum {
+    Opt_mode,
+    Opt_err
+};
+
+static const match_table_t tokens = {
+    {Opt_mode, "mode=%o"},
+    {Opt_err, NULL}
+};
+
+struct kfs_fs_info {
+    struct kfs_mount_opts mount_opts;
+};
+
+static int kfs_parse_options(char *data, struct kfs_mount_opts *opts)
+{
+    substring_t args[MAX_OPT_ARGS];
+    int option;
+    int token;
+    char *p;
+
+    opts->mode = KFS_DEFAULT_MODE;
+
+    while ((p = strsep(&data, ",")) != NULL) {
+        if (!*p)
+            continue;
+
+        token = match_token(p, tokens, args);
+        switch (token) {
+            case Opt_mode:
+                if (match_octal(&args[0], &option))
+                    return -EINVAL;
+                opts->mode = option & S_IALLUGO;
+                break;
+                /*
+                 * We might like to report bad mount options here;
+                 * but traditionally ramfs has ignored all mount options,
+                 * and as it is used as a !CONFIG_SHMEM simple substitute
+                 * for tmpfs, better continue to ignore other mount options.
+                 */
+        }
+    }
+
+    return 0;
+}
+
+static int kfs_fill_super(struct super_block * sb, void * data, int silent)
+{
+    struct kfs_fs_info *fsi;
+    struct inode *inode = NULL;
+    struct dentry *root;
+    int err;
+
+    save_mount_options(sb, data);
+
+    fsi = kzalloc(sizeof(struct kfs_fs_info), GFP_KERNEL);
+    sb->s_fs_info = fsi;
+    if (!fsi) {
+        err = -ENOMEM;
+        goto fail;
+    }
+
+    err = kfs_parse_options(data, &fsi->mount_opts);
+    if (err)
+        goto fail;
+
+    sb->s_maxbytes		= MAX_LFS_FILESIZE;
+    sb->s_blocksize		= PAGE_CACHE_SIZE;
+    sb->s_blocksize_bits	= PAGE_CACHE_SHIFT;
+    sb->s_magic		= KFS_MAGIC;
+    sb->s_op		= &kfs_ops;
+    sb->s_time_gran		= 1;
+
+    inode = kfs_get_inode(sb, S_IFDIR | fsi->mount_opts.mode, 0);
+    if (!inode) {
+        err = -ENOMEM;
+        goto fail;
+    }
+
+    root = d_alloc_root(inode);
+    sb->s_root = root;
+    if (!root) {
+        err = -ENOMEM;
+        goto fail;
+    }
+
+    return 0;
+fail:
+    kfree(fsi);
+    sb->s_fs_info = NULL;
+    iput(inode);
+    return err;
+}
+
+int kfs_get_sb(struct file_system_type *fs_type,
+        int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+{
+    return get_sb_nodev(fs_type, flags, data, kfs_fill_super, mnt);
+}
+
+static int rootfs_get_sb(struct file_system_type *fs_type,
+        int flags, const char *dev_name, void *data, struct vfsmount *mnt)
+{
+    return get_sb_nodev(fs_type, flags|MS_NOUSER, data, kfs_fill_super,
+            mnt);
+}
+
+static void kfs_kill_sb(struct super_block *sb)
+{
+    kfree(sb->s_fs_info);
+    kill_litter_super(sb);
+}
+
+static struct file_system_type kfs_fs_type = {
+    .name		= "kfs",
+    .get_sb		= kfs_get_sb,
+    .kill_sb	= kfs_kill_sb,
+};
+
+static int __init init_kfs_fs(void)
+{
+    return register_filesystem(&kfs_fs_type);
+}
+
+static void __exit exit_kfs_fs(void)
+{
+    unregister_filesystem(&kfs_fs_type);
+}
+
+module_init(init_kfs_fs);
+module_exit(exit_kfs_fs);
+
+MODULE_LICENSE("GPL");
