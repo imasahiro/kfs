@@ -10,7 +10,6 @@
 #define printf(fmt, ...) \
     printk(KERN_INFO "KFS: %s() at %d : " fmt, __FUNCTION__, __LINE__,## __VA_ARGS__)
 
-/* ======================================================================== */
 /* [constructors] */
 
 KNHAPI(Chardev*) new_Chardev(Ctx *ctx)
@@ -21,8 +20,6 @@ KNHAPI(Chardev*) new_Chardev(Ctx *ctx)
     return cdev;
 }
 
-/* ------------------------------------------------------------------------ */
-
 static void knh_Chardev_setName(Ctx *ctx, Chardev *o, char* devname)
 {
     char* name = o->device->name;
@@ -32,7 +29,6 @@ static void knh_Chardev_setName(Ctx *ctx, Chardev *o, char* devname)
     //fprintf(stderr, "%s,%s,%s\n",__FUNCTION__,devname,o->device->name);
 }
 
-/* ------------------------------------------------------------------------ */
 /* [new] */
 /* @method[VIRTUAL] This! Chardev.new(String! devname) */
 
@@ -45,7 +41,6 @@ METHOD Chardev_new(Ctx *ctx, knh_sfp_t *sfp)
     KNH_RETURN(ctx, sfp, o);
 }
 
-/* ------------------------------------------------------------------------ */
 static int knh_device_open (struct inode* inode, struct file *filp)
 {
     filp->private_data = container_of(inode->i_cdev, knh_device_t,cdev);
@@ -119,7 +114,8 @@ knh_bool_t knh_Chardev_regist(Ctx *ctx, Chardev *o)
     char* name = dev->name;
     int err = alloc_chrdev_region(&dev->id, 0, 1, name);
     if(err){
-        printk(KERN_ALERT "%s: alloc_chrdev_region() failed (%d)\n",name,err);
+        printk(KERN_ALERT "%s: alloc_chrdev_region() failed (%d)\n",
+                name,err);
         return 0; // false
     }
     cdev_init(&dev->cdev,&knh_fops);
@@ -134,7 +130,6 @@ knh_bool_t knh_Chardev_regist(Ctx *ctx, Chardev *o)
     return 1;
 }
 
-/* ------------------------------------------------------------------------ */
 /* @method Boolean! Chardev.regist() */
 
 METHOD Chardev_regist(Ctx *ctx, knh_sfp_t *sfp)
@@ -144,7 +139,6 @@ METHOD Chardev_regist(Ctx *ctx, knh_sfp_t *sfp)
     KNH_RETURN_Boolean(ctx, sfp, knh_Chardev_regist(ctx, cdev))
 }
 
-/* ------------------------------------------------------------------------ */
 /* @method Boolean! Chardev.unregist() */
 
 METHOD Chardev_unregist(Ctx *ctx, knh_sfp_t *sfp)
@@ -159,7 +153,6 @@ METHOD Chardev_unregist(Ctx *ctx, knh_sfp_t *sfp)
     KNH_RETURN_Boolean(ctx, sfp, 1);
 }
 
-/* ------------------------------------------------------------------------ */
 /* @method Boolean! Chardev.addFunc(String op, Closure c) */
 
 METHOD Chardev_addFunc(Ctx *ctx, knh_sfp_t *sfp)
@@ -174,7 +167,6 @@ METHOD Chardev_addFunc(Ctx *ctx, knh_sfp_t *sfp)
 }
 
 
-/* ------------------------------------------------------------------------ */
 static int __init kcs_module_init(void)
 {
     printf("");

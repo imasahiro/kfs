@@ -47,8 +47,8 @@ static const struct inode_operations kfs_dir_inode_operations;
 extern const struct file_operations kfs_file_operations;
 
 static struct backing_dev_info kfs_backing_dev_info = {
-    .ra_pages	= 0,	/* No readahead */
-    .capabilities	= BDI_CAP_NO_ACCT_AND_WRITEBACK |
+    .ra_pages       = 0,	/* No readahead */
+    .capabilities   = BDI_CAP_NO_ACCT_AND_WRITEBACK |
         BDI_CAP_MAP_DIRECT | BDI_CAP_MAP_COPY |
         BDI_CAP_READ_MAP | BDI_CAP_WRITE_MAP | BDI_CAP_EXEC_MAP,
 };
@@ -78,7 +78,10 @@ struct inode *kfs_get_inode(struct super_block *sb, int mode, dev_t dev)
                 inode->i_op = &kfs_dir_inode_operations;
                 inode->i_fop = &simple_dir_operations;
 
-                /* directory inodes start off with i_nlink == 2 (for "." entry) */
+                /* 
+                 * directory inodes start off with 
+                 * i_nlink == 2 (for "." entry) 
+                 */
                 inc_nlink(inode);
                 break;
             case S_IFLNK:
@@ -105,7 +108,7 @@ static int kfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t d
                 inode->i_mode |= S_ISGID;
         }
         d_instantiate(dentry, inode);
-        dget(dentry);	/* Extra count - pin the dentry in core */
+        dget(dentry); /* Extra count - pin the dentry in core */
         error = 0;
         dir->i_mtime = dir->i_ctime = CURRENT_TIME;
     }
@@ -147,21 +150,21 @@ static int kfs_symlink(struct inode * dir, struct dentry *dentry, const char * s
 }
 
 static const struct inode_operations kfs_dir_inode_operations = {
-    .create		= kfs_create,
-    .lookup		= simple_lookup,
-    .link		= simple_link,
-    .unlink		= simple_unlink,
-    .symlink	= kfs_symlink,
-    .mkdir		= kfs_mkdir,
-    .rmdir		= simple_rmdir,
-    .mknod		= kfs_mknod,
-    .rename		= simple_rename,
+    .create  = kfs_create,
+    .lookup  = simple_lookup,
+    .link    = simple_link,
+    .unlink  = simple_unlink,
+    .symlink = kfs_symlink,
+    .mkdir   = kfs_mkdir,
+    .rmdir   = simple_rmdir,
+    .mknod   = kfs_mknod,
+    .rename  = simple_rename,
 };
 
 static const struct super_operations kfs_ops = {
-    .statfs		= simple_statfs,
-    .drop_inode	= generic_delete_inode,
-    .show_options	= generic_show_options,
+    .statfs       = simple_statfs,
+    .drop_inode   = generic_delete_inode,
+    .show_options = generic_show_options,
 };
 
 struct kfs_mount_opts {
@@ -206,7 +209,8 @@ static int kfs_parse_options(char *data, struct kfs_mount_opts *opts)
                  * We might like to report bad mount options here;
                  * but traditionally ramfs has ignored all mount options,
                  * and as it is used as a !CONFIG_SHMEM simple substitute
-                 * for tmpfs, better continue to ignore other mount options.
+                 * for tmpfs, better continue to ignore other mount 
+                 * options.
                  */
         }
     }
@@ -275,9 +279,9 @@ static void kfs_kill_sb(struct super_block *sb)
 }
 
 static struct file_system_type kfs_fs_type = {
-    .name		= "kfs",
-    .get_sb		= kfs_get_sb,
-    .kill_sb	= kfs_kill_sb,
+    .name   = "kfs",
+    .get_sb = kfs_get_sb,
+    .kill_sb= kfs_kill_sb,
 };
 
 static int __init init_kfs_fs(void)
